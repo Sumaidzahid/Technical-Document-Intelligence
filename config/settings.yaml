@@ -1,0 +1,23 @@
+project:
+  name: "Technical Document Intelligence"
+  version: "0.1.0"
+  author: "Sumaid Zahid"
+
+paths:
+  dataset: "dataset"
+  inventory: "dataset/Inventory.csv"
+  output: "output"
+  logs: "logs"
+
+dataset:
+  categories:
+    - microcontrollers
+    - operational amplifiers
+    - voltage regulators
+
+  supported_formats:
+    - ".pdf"
+
+processing:
+  language: "en"
+  preserve_page_references: true

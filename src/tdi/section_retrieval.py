@@ -9,7 +9,10 @@ from typing import Any
 class NoBookmarks(Exception):
     """Raised when a PDF has no usable bookmark outline."""
 
+#---------------------------loader--------------------------------
+
 def metadata_retrieval(metadata_dir: Path, categories: list) -> list:
+    """Retrieve PDF metadata records from the output directory."""
     documents = []
     for category in categories:
         category_dir = metadata_dir / category
@@ -21,6 +24,7 @@ def metadata_retrieval(metadata_dir: Path, categories: list) -> list:
     return documents
 
 def read_jsonl(jsonl_file: Path) -> list[dict[str, Any]]:
+    """Read JSON objects from a JSONL file."""
     records: list[dict[str, Any]] = []
     with jsonl_file.open("r", encoding="utf-8") as file:
         for line in file:
@@ -31,8 +35,10 @@ def read_jsonl(jsonl_file: Path) -> list[dict[str, Any]]:
                 records.append(record)
     return records
 
+#-------------------------retrieval section------------------------
+# Header/footer detection thresholds.
 MARGIN = 0.081     # top/bottom fraction of the page treated as header/footer zone
-REPEAT = 0.40      # a margin line on >= 40% of pages counts as running header/footer
+REPEAT = 0.40      # fraction of pages a repeating margin line must appear on
 
 def norm(s: str) -> str:
     """Collapse whitespace, strip leading section number, lowercase."""
@@ -40,7 +46,7 @@ def norm(s: str) -> str:
     return re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", s).casefold()
 
 def block_lines(b) -> set[str]:
-    """Normalized non-empty lines in a text block."""
+    """Non-empty lines in a text block, with digits masked for matching."""
     return {
         re.sub(r"\d+", "#", " ".join(line.split()))
         for line in b[4].splitlines()
@@ -48,10 +54,11 @@ def block_lines(b) -> set[str]:
     }
 
 def in_margin(b, page_height: float) -> bool:
+    """Return whether a text block intersects the header or footer margin."""
     return b[3] < MARGIN * page_height or b[1] > (1 - MARGIN) * page_height
 
 def find_running_blocks(doc: pymupdf.Document) -> set[str]:
-    """Keys of header/footer lines that repeat across the document."""
+    """Return masked header/footer lines that occur on enough document pages."""
     counts: Counter = Counter()
     for page in doc:
         h = page.rect.height
@@ -73,7 +80,7 @@ def locate(blocks: list, title: str) -> int | None:
     return None
 
 def drop_nested(hits: list[int], toc: list) -> list[int]:
-    """Remove headings of higher level that sit inside an already-kept heading of lower level (avoids duplicates)."""
+    """Remove nested heading hits beneath an already-kept ancestor (avoids duplicates)."""
     kept: list[int] = []
     for i in hits:
         inside = any(
@@ -85,56 +92,80 @@ def drop_nested(hits: list[int], toc: list) -> list[int]:
     return kept
 
 def section_from_bookmarks(doc: pymupdf.Document, toc: list, idx: int, running: set[str]) -> dict[str, Any]:
+    """Extract the text and bookmark metadata for a searched heading."""
     level, title, start_page, *_ = toc[idx]
     # Section ends at the next bookmark of the same or higher level.
     end_idx = next((j for j in range(idx + 1, len(toc)) if toc[j][0] <= level), len(toc))
     end = toc[end_idx] if end_idx < len(toc) else None
+    # child headings that belong to the parent heading
     children = [(t[0], t[1], t[2]) for t in toc[idx + 1:end_idx]]
+    
     first = start_page - 1                      # bookmarks are 1-based
-    last = max(first, (end[2] - 1) if end else len(doc) - 1)
+    last = max(first, (end[2] - 1) if end else len(doc) - 1) # last page
 
     pages, warnings = [], []
+    start_y = end_y = None # START AND END CORDINATES INTIALIZED
     for pn in range(first, last + 1):
         h = doc[pn].rect.height
-        blocks = [
-            b for b in doc[pn].get_text("blocks", sort=True)
-            if b[6] == 0 and not (in_margin(b, h) and block_lines(b) & running)
-        ]
-        lo, hi = 0, len(blocks)
-
+        blocks= []
+        removed = []
+        # Exclude repeated header/footer text while preserving ordinary page text.
+        for b in doc[pn].get_text("blocks", sort=True):
+            # remove images 6 here is for images
+            if b[6] != 0:
+                continue
+            # if in_margin(b,h) and block_lines(b) & running:
+            #     removed.append(b)
+            # else:
+            #     blocks.append(b)
+            # one line version below
+            (removed if in_margin(b, h) and block_lines(b) & running else blocks).append(b)
+        # Body area: below the running header, above the running footer.
+        body_top = max((b[3] for b in removed if b[3] < h / 2), default=0.0)
+        body_bottom = min((b[1] for b in removed if b[1] >= h / 2), default=h)
+        y_b_t, y_b_b = body_top, body_bottom
         if pn == first:
             i = locate(blocks, title)
             if i is None:
                 warnings.append(f"start anchor not found on page {pn + 1}")
             else:
-                lo = i
-        if end and pn == last:
-            j = locate(blocks, end[1])
-            if j is None:
-                warnings.append(f"end anchor not found on page {pn + 1}")
+                start_y = blocks[i][1]
+                y_b_t = max(y_b_t, start_y) # insure not above in the header and not below bounding box start
+        if pn == last:
+            # If there is no next heading, set the end boundary to the bottom of the page body (above the footer)
+            if end is None:
+                end_y = body_bottom
             else:
-                hi = j
+                j = locate(blocks, end[1])
+                if j is None:
+                    warnings.append(f"end anchor not found on page {pn + 1}")
+                else:
+                    end_y = blocks[j][1] 
+                    y_b_b = min(y_b_b, end_y) # insure that not below into the footer but above it and not set below the bounding box bottom
 
-        # Edge case: section starts and ends on the same page
-        if hi < lo:
+        # Edge case: section starts and ends on the same page but in wrong order in that case use the whole page cordinates
+        if pn == first == last and start_y is not None and end is not None and end_y is not None and end_y <= start_y:
             warnings.append(f"anchors out of order on page {pn + 1}")
-            lo, hi = 0, len(blocks)
+            y_b_t, y_b_b = body_top, body_bottom
+            start_y = end_y = None
 
-        text = "\n".join(b[4].strip() for b in blocks[lo:hi]).strip()
-        if text:
-            pages.append({"page_number": pn + 1, "text": text})
+        if any(y_b_t <= (b[1] + b[3]) / 2 < y_b_b for b in blocks):
+            pages.append({"page_number": pn + 1, "y_top": round(y_b_t, 1), "y_bottom": round(y_b_b, 1)})
 
     return {
         "heading": title,
         "bookmark_level": level,
         "start_page": start_page,
         "end_page": last + 1,
+        "start_y": None if start_y is None else round(start_y, 1),
+        "end_y": None if end_y is None else round(end_y, 1),
+        "pages": pages,
         "children": children,
-        "text": pages,
         "warnings": warnings,
     }
 
 def sec_ret(pdf_path: Path, search_term: str) -> list[dict[str, Any]]:
+    """Return bookmark-based section information for headings matching a search term."""
     q = norm(search_term)
     with pymupdf.open(pdf_path) as doc:
         toc = [t for t in doc.get_toc() if t[2] > 0]
@@ -145,7 +176,9 @@ def sec_ret(pdf_path: Path, search_term: str) -> list[dict[str, Any]]:
         running = find_running_blocks(doc)
         return [section_from_bookmarks(doc, toc, i, running) for i in hits]
 
+# --------------------------------Debug--------------------------------------
 def summarize(s: dict[str, Any]) -> None:
+    """For debuging and insuring that section retrieval works"""
     n = s["end_page"] - s["start_page"] + 1
     print(f"\n=== {s['heading']} | bookmark level {s['bookmark_level']} "
           f"| pages {s['start_page']}-{s['end_page']} ({n} pages) ===")
@@ -154,14 +187,19 @@ def summarize(s: dict[str, Any]) -> None:
     for lvl, title, pg in s["children"]:
         indent = "  " * (lvl - s["bookmark_level"])
         print(f"  {indent}{title}  (p{pg})")
-    print("Extracted text per page:")
-    for p in s["text"]:
-        first_line = p["text"].split("\n", 1)[0][:60]
-        print(f"  page: {p['page_number']:>3}  {len(p['text']):>6} chars  starts: {first_line!r}")
+    print("Body band per page (y_top -> y_bottom):")
+    for p in s["pages"]:
+        print(f"  page: {p['page_number']:>3}  {p['y_top']:>7} -> {p['y_bottom']:>7}")
 
-def dump_text(s: dict[str, Any]) -> None:
-    for p in s["text"]:
-        print(f"\n-- Page {p['page_number']} --\n{p['text']}")
+def section_text(doc: pymupdf.Document, section: dict[str, Any]) -> str:
+    """Reference reader: turns a section's bands back into text.
+    Whatever consumes the metadata must apply this same rule."""
+    out = []
+    for p in section["pages"]:
+        for b in doc[p["page_number"] - 1].get_text("blocks", sort=True):
+            if b[6] == 0 and p["y_top"] <= (b[1] + b[3]) / 2 < p["y_bottom"]:
+                out.append(b[4].strip())
+    return "\n".join(out)
 
 if __name__ == "__main__":
     full = "--full" in sys.argv
@@ -194,4 +232,5 @@ if __name__ == "__main__":
     for s in sections:
         summarize(s)
         if full:
-            dump_text(s)
+            with pymupdf.open(pdf_path) as doc:
+                print("\n" + section_text(doc, s))

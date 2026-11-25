@@ -38,7 +38,8 @@ def extract_dataset(dataset_dir: Path,categories: list[str],project_root: Path,d
             file for file in category_dir.rglob("*")
             if file.is_file() and file.suffix.lower() == ".pdf")
 
-        print(f"\nProcessing category: {category}")
+        if debug:
+            print(f"\nProcessing category: {category}")
 
         for pdf_path in pdf_files:
             try:
@@ -55,14 +56,13 @@ def extract_dataset(dataset_dir: Path,categories: list[str],project_root: Path,d
 
                     total_documents += 1
 
-                    print(f"[OK] {pdf_path.name}")
-
                     if debug:
-                        print(doc_info)
+                        print(f"[OK] {pdf_path.name}")
 
             except Exception as error:
                 failed_documents += 1
-                print(f"[ERROR] {pdf_path.name}: {error}")
+                if debug:
+                    print(f"[ERROR] {pdf_path.name}: {error}")
 
     summary = {
         "documents_processed": total_documents,
@@ -70,12 +70,13 @@ def extract_dataset(dataset_dir: Path,categories: list[str],project_root: Path,d
         "Output_directory" : result_path
     }
 
-    print("\n" + "=" * 50)
-    print("DOCUMENT INGESTION SUMMARY")
-    print("=" * 50)
+    if debug:
+        print("\n" + "=" * 50)
+        print("DOCUMENT INGESTION SUMMARY")
+        print("=" * 50)
 
-    for key, value in summary.items():
-        print(f"{key.replace('_', ' ').title()}: {value}")
-    print("=" * 50)
+        for key, value in summary.items():
+            print(f"{key.replace('_', ' ').title()}: {value}")
+        print("=" * 50)
 
     return summary
